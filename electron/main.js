@@ -93,6 +93,73 @@ function listFilesRecursive(dir, base = dir) {
   return out.sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/**
+ * Group the files directly inside one folder into lessons, by filename stem:
+ * "01 - Intro.mp4" + "01 - Intro.md" + "01 - Intro.srt" = one lesson.
+ * `excludeFiles` holds lowercase filenames to skip (e.g. course.md, the
+ * course description file — it is not a lesson). Subfolders named like a
+ * lesson stem hold that lesson's resources. A stem that is only a resources
+ * folder (no video/note/subtitle) is not a lesson and is skipped.
+ */
+function buildLessonsFromDir(dirPath, moduleId, excludeFiles = new Set()) {
+  const byStem = new Map()
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const full = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      // A folder named like a lesson stem holds that lesson's resources.
+      const stem = entry.name
+      if (!byStem.has(stem)) byStem.set(stem, { stem, resourcesDir: full })
+      else byStem.get(stem).resourcesDir = full
+      continue
+    }
+    if (excludeFiles.has(entry.name.toLowerCase())) continue
+    const ext = path.extname(entry.name).toLowerCase()
+    const stem = path.basename(entry.name, ext)
+    if (!byStem.has(stem)) byStem.set(stem, { stem })
+    const lesson = byStem.get(stem)
+    if (VIDEO_EXTS.has(ext)) lesson.video = full
+    else if (ext === '.md') lesson.note = full
+    else if (SUB_EXTS.has(ext)) {
+      lesson.subtitles = lesson.subtitles || []
+      lesson.subtitles.push({ path: full, lang: ext === '.vtt' ? 'vtt' : 'srt' })
+    }
+    // Anything else loose in the folder is ignored.
+  }
+
+  const lessons = []
+  for (const raw of byStem.values()) {
+    const { order: lOrder, title: lTitle } = splitPrefix(raw.stem)
+    const lesson = {
+      id: `${moduleId}/${raw.stem}`,
+      name: lTitle,
+      order: lOrder,
+      path: raw.stem,
+      video: raw.video || null,
+      note: raw.note || null,
+      subtitles: raw.subtitles || [],
+      resourcesDir: raw.resourcesDir || null,
+      resources: raw.resourcesDir ? listFilesRecursive(raw.resourcesDir) : []
+    }
+    if (!lesson.video && !lesson.note && lesson.subtitles.length === 0) continue
+    lessons.push(lesson)
+  }
+  lessons.sort(sortByPrefix)
+  return lessons
+}
+
+/** Read a course.md file: first "# Heading" is the display title. */
+function readCourseMd(courseMdPath, course) {
+  if (!fs.existsSync(courseMdPath)) return
+  const raw = fs.readFileSync(courseMdPath, 'utf8')
+  const lines = raw.split('\n')
+  if (lines[0].startsWith('# ')) {
+    course.name = lines[0].replace(/^#\s+/, '').trim()
+    course.description = lines.slice(1).join('\n').trim()
+  } else {
+    course.description = raw.trim()
+  }
+}
+
 function scanLibrary(root) {
   const courses = []
   if (!root || !fs.existsSync(root)) return courses
@@ -110,18 +177,7 @@ function scanLibrary(root) {
       modules: []
     }
 
-    const courseMd = path.join(coursePath, 'course.md')
-    if (fs.existsSync(courseMd)) {
-      const raw = fs.readFileSync(courseMd, 'utf8')
-      // First "# Heading" is the display title; the rest is the description.
-      const lines = raw.split('\n')
-      if (lines[0].startsWith('# ')) {
-        course.name = lines[0].replace(/^#\s+/, '').trim()
-        course.description = lines.slice(1).join('\n').trim()
-      } else {
-        course.description = raw.trim()
-      }
-    }
+    readCourseMd(path.join(coursePath, 'course.md'), course)
 
     for (const modEntry of fs.readdirSync(coursePath, { withFileTypes: true })) {
       if (!modEntry.isDirectory() || modEntry.name.startsWith('.')) continue
@@ -132,59 +188,54 @@ function scanLibrary(root) {
         name: mod.title,
         order: mod.order,
         path: modPath,
-        lessons: []
+        lessons: buildLessonsFromDir(modPath, `${course.id}/${modEntry.name}`)
       }
-
-      // Group the files in this module by filename stem:
-      // "01 - Intro.mp4" + "01 - Intro.md" + "01 - Intro.srt" = one lesson.
-      const byStem = new Map()
-      for (const entry of fs.readdirSync(modPath, { withFileTypes: true })) {
-        const full = path.join(modPath, entry.name)
-        if (entry.isDirectory()) {
-          // A folder named like a lesson stem holds that lesson's resources.
-          const stem = entry.name
-          if (!byStem.has(stem)) byStem.set(stem, { stem, resourcesDir: full })
-          else byStem.get(stem).resourcesDir = full
-          continue
-        }
-        const ext = path.extname(entry.name).toLowerCase()
-        const stem = path.basename(entry.name, ext)
-        if (!byStem.has(stem)) byStem.set(stem, { stem })
-        const lesson = byStem.get(stem)
-        if (VIDEO_EXTS.has(ext)) lesson.video = full
-        else if (ext === '.md') lesson.note = full
-        else if (SUB_EXTS.has(ext)) {
-          lesson.subtitles = lesson.subtitles || []
-          lesson.subtitles.push({ path: full, lang: ext === '.vtt' ? 'vtt' : 'srt' })
-        }
-        // Anything else loose in the module folder is ignored.
-      }
-
-      for (const raw of byStem.values()) {
-        const { order: lOrder, title: lTitle } = splitPrefix(raw.stem)
-        const lesson = {
-          id: `${module.id}/${raw.stem}`,
-          name: lTitle,
-          order: lOrder,
-          path: raw.stem,
-          video: raw.video || null,
-          note: raw.note || null,
-          subtitles: raw.subtitles || [],
-          resourcesDir: raw.resourcesDir || null,
-          resources: raw.resourcesDir ? listFilesRecursive(raw.resourcesDir) : []
-        }
-        // A stem that is only a resources folder (no video/note/subtitle)
-        // is not a lesson — skip it.
-        if (!lesson.video && !lesson.note && lesson.subtitles.length === 0) continue
-        module.lessons.push(lesson)
-      }
-
-      module.lessons.sort(sortByPrefix)
       if (module.lessons.length > 0) course.modules.push(module)
+    }
+
+    // Flatter layout: lesson files directly inside the course folder
+    // (no module subfolders) become one "Lessons" module. course.md is
+    // the course description, not a lesson, so it is excluded.
+    const flatLessons = buildLessonsFromDir(
+      coursePath,
+      `${course.id}/Lessons`,
+      new Set(['course.md'])
+    )
+    if (flatLessons.length > 0) {
+      course.modules.push({
+        id: `${course.id}/Lessons`,
+        name: 'Lessons',
+        order: 9999,
+        path: coursePath,
+        lessons: flatLessons
+      })
     }
 
     course.modules.sort(sortByPrefix)
     if (course.modules.length > 0) courses.push(course)
+  }
+
+  // Flattest layout: lesson files directly inside the selected folder
+  // (no course subfolders with content) — the folder itself is one course,
+  // named after the folder, with a single "Lessons" module.
+  const rootLessons = buildLessonsFromDir(root, `${path.basename(root)}/Lessons`, new Set(['course.md']))
+  if (rootLessons.length > 0) {
+    const rootCourse = {
+      id: path.basename(root),
+      name: splitPrefix(path.basename(root)).title,
+      order: 9999,
+      path: root,
+      description: '',
+      modules: [{
+        id: `${path.basename(root)}/Lessons`,
+        name: 'Lessons',
+        order: 9999,
+        path: root,
+        lessons: rootLessons
+      }]
+    }
+    readCourseMd(path.join(root, 'course.md'), rootCourse)
+    courses.push(rootCourse)
   }
 
   courses.sort(sortByPrefix)

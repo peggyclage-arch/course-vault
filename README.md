@@ -37,6 +37,9 @@ Library/
 
 - A leading number (`01 - `) sets the order; without one, lessons sort alphabetically.
 - A lesson needs at least one of: a video, a notes file, or subtitles.
+- Flatter folders work too: videos directly inside a course folder become
+  one "Lessons" module, and videos directly inside the folder you pick
+  become one course named after that folder.
 - Nothing is renamed or moved. A `demo-library/` folder ships with the
   source repo so you can see the layout in action (one sample course, notes
   and subtitles, no video files) — pick it as your library folder to try

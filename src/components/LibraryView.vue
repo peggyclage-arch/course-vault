@@ -10,7 +10,9 @@
       <p class="convention">Expected layout:
         <code>Library / &lt;Course&gt; / &lt;Module&gt; / 01 - &lt;Lesson&gt;.mp4</code>
         — with optional <code>.md</code> notes, <code>.srt</code> subtitles and a
-        <code>01 - &lt;Lesson&gt;/</code> folder for downloads next to each lesson.</p>
+        <code>01 - &lt;Lesson&gt;/</code> folder for downloads next to each lesson.
+        Videos directly in a course folder, or directly in the folder you pick,
+        work too — they become one course / one module of lessons.</p>
       <button class="btn btn-primary" @click="pickLibrary">Choose library folder</button>
       <p class="hint">Tip: the app ships with a <code>demo-library</code> folder you can
         pick to see the layout in action — one sample course, notes and subtitles, no video files.</p>
@@ -18,8 +20,16 @@
 
     <div v-else-if="store.courses.length === 0" class="empty">
       <h1>No courses found</h1>
-      <p>The folder <code>{{ store.libraryPath }}</code> has no courses in it yet.
-        Add a folder per course, with module folders inside, and lessons inside those.</p>
+      <p>Scanned folder: <code>{{ store.libraryPath }}</code></p>
+      <p>CourseVault looks for video, notes or subtitle files in one of these layouts:</p>
+      <p class="convention">
+        <code>Library / &lt;Course&gt; / &lt;Module&gt; / 01 - &lt;Lesson&gt;.mp4</code><br />
+        <code>Library / &lt;Course&gt; / 01 - &lt;Lesson&gt;.mp4</code> — videos directly in a course folder<br />
+        <code>Library / 01 - &lt;Lesson&gt;.mp4</code> — videos directly in the folder you picked
+      </p>
+      <p class="hint">A lesson needs at least one of: a video (<code>.mp4</code>, <code>.mkv</code>,
+        <code>.webm</code>, <code>.mov</code>), a notes file (<code>.md</code>) or subtitles
+        (<code>.srt</code> / <code>.vtt</code>). Other files are ignored.</p>
       <button class="btn btn-primary" @click="pickLibrary">Choose another folder</button>
     </div>
 
