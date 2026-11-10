@@ -15,6 +15,7 @@ const { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } = require('e
 const path = require('path')
 const fs = require('fs')
 const chokidar = require('chokidar')
+const mega = require('./mega')
 
 // The custom scheme must be registered as privileged BEFORE the app is
 // ready, otherwise <video> and fetch() cannot use it: without
@@ -36,9 +37,14 @@ const STATE_FILE = path.join(app.getPath('userData'), 'coursevault-state.json')
 
 function loadState() {
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+    return {
+      libraryPath: parsed.libraryPath || null,
+      megaLinks: Array.isArray(parsed.megaLinks) ? parsed.megaLinks : [],
+      progress: parsed.progress || {}
+    }
   } catch {
-    return { libraryPath: null, progress: {} }
+    return { libraryPath: null, megaLinks: [], progress: {} }
   }
 }
 
@@ -49,6 +55,13 @@ function saveState(state) {
 
 let state = loadState()
 let libraryRoot = state.libraryPath || null
+
+// Mega download cache + progress events (forwarded to the renderer so the
+// player can show "Streaming from Mega — X / Y cached").
+mega.init(app.getPath('userData'), (event) => {
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) win.webContents.send('mega:progress', event)
+})
 
 // ---------------------------------------------------------------------------
 // Library scanner
@@ -74,7 +87,11 @@ function splitPrefix(name) {
 }
 
 function sortByPrefix(a, b) {
-  return a.order - b.order || a.title.localeCompare(b.title)
+  // Courses, modules and lessons carry `name` + `order` (splitPrefix's
+  // `title` is folded into `name` when the objects are built), so compare
+  // names here — comparing `title` threw on any two items sharing an
+  // order (e.g. two unprefixed names, both order 9999).
+  return a.order - b.order || (a.name || '').localeCompare(b.name || '')
 }
 
 function listFilesRecursive(dir, base = dir) {
@@ -100,35 +117,64 @@ function listFilesRecursive(dir, base = dir) {
  * course description file — it is not a lesson). Subfolders named like a
  * lesson stem hold that lesson's resources. A stem that is only a resources
  * folder (no video/note/subtitle) is not a lesson and is skipped.
+ *
+ * Generic over the source: an entry is
+ *   { name, isDirectory, size, ref, children? }
+ * where `ref` is the file's locator — an absolute local path, or a
+ * `mega://<linkIndex>/<handle>` locator for Mega files — and `children`
+ * (for a directory entry) lists its entries for resource folders.
+ * Loose files that share a lesson's stem but are not a video/note/subtitle
+ * (e.g. a .pdf handout next to the video) become that lesson's resources.
  */
-function buildLessonsFromDir(dirPath, moduleId, excludeFiles = new Set()) {
+function buildLessonsFromEntries(entries, moduleId, excludeFiles = new Set()) {
   const byStem = new Map()
-  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-    const full = path.join(dirPath, entry.name)
-    if (entry.isDirectory()) {
+  const otherFiles = []
+  for (const entry of entries) {
+    if (entry.isDirectory) {
       // A folder named like a lesson stem holds that lesson's resources.
       const stem = entry.name
-      if (!byStem.has(stem)) byStem.set(stem, { stem, resourcesDir: full })
-      else byStem.get(stem).resourcesDir = full
+      if (!byStem.has(stem)) byStem.set(stem, { stem, resourcesDir: entry })
+      else byStem.get(stem).resourcesDir = entry
       continue
     }
     if (excludeFiles.has(entry.name.toLowerCase())) continue
     const ext = path.extname(entry.name).toLowerCase()
     const stem = path.basename(entry.name, ext)
-    if (!byStem.has(stem)) byStem.set(stem, { stem })
-    const lesson = byStem.get(stem)
-    if (VIDEO_EXTS.has(ext)) lesson.video = full
-    else if (ext === '.md') lesson.note = full
-    else if (SUB_EXTS.has(ext)) {
-      lesson.subtitles = lesson.subtitles || []
-      lesson.subtitles.push({ path: full, lang: ext === '.vtt' ? 'vtt' : 'srt' })
+    if (VIDEO_EXTS.has(ext) || ext === '.md' || SUB_EXTS.has(ext)) {
+      if (!byStem.has(stem)) byStem.set(stem, { stem })
+      const lesson = byStem.get(stem)
+      if (VIDEO_EXTS.has(ext)) lesson.video = entry.ref
+      else if (ext === '.md') lesson.note = entry.ref
+      else {
+        lesson.subtitles = lesson.subtitles || []
+        lesson.subtitles.push({ path: entry.ref, lang: ext === '.vtt' ? 'vtt' : 'srt' })
+      }
+    } else {
+      // Loose companion file (e.g. .pdf/.docx/.jpg) — a resource if its
+      // stem turns out to be a lesson, otherwise ignored.
+      otherFiles.push({ stem, name: entry.name, ref: entry.ref, size: entry.size || 0 })
     }
-    // Anything else loose in the folder is ignored.
   }
 
   const lessons = []
   for (const raw of byStem.values()) {
     const { order: lOrder, title: lTitle } = splitPrefix(raw.stem)
+    const resources = []
+    if (raw.resourcesDir) {
+      const dirEntry = raw.resourcesDir
+      if (dirEntry.ref && typeof dirEntry.ref === 'string' && !mega.isMegaLocator(dirEntry.ref)) {
+        resources.push(...listFilesRecursive(dirEntry.ref))
+      } else if (Array.isArray(dirEntry.children)) {
+        const collect = (nodes, prefix) => {
+          for (const child of nodes) {
+            const rel = prefix ? `${prefix}/${child.name}` : child.name
+            if (child.isDirectory) collect(child.children || [], rel)
+            else resources.push({ name: rel, path: child.ref, size: child.size || 0 })
+          }
+        }
+        collect(dirEntry.children, '')
+      }
+    }
     const lesson = {
       id: `${moduleId}/${raw.stem}`,
       name: lTitle,
@@ -137,15 +183,54 @@ function buildLessonsFromDir(dirPath, moduleId, excludeFiles = new Set()) {
       video: raw.video || null,
       note: raw.note || null,
       subtitles: raw.subtitles || [],
-      resourcesDir: raw.resourcesDir || null,
-      resources: raw.resourcesDir ? listFilesRecursive(raw.resourcesDir) : []
+      resourcesDir: raw.resourcesDir && typeof raw.resourcesDir.ref === 'string' && !mega.isMegaLocator(raw.resourcesDir.ref)
+        ? raw.resourcesDir.ref
+        : null,
+      resources
     }
     if (!lesson.video && !lesson.note && lesson.subtitles.length === 0) continue
     lessons.push(lesson)
   }
+  // Loose same-stem companion files become resources of their lesson.
+  for (const other of otherFiles) {
+    const lesson = lessons.find((l) => l.path === other.stem)
+    if (lesson) lesson.resources.push({ name: other.name, path: other.ref, size: other.size })
+  }
   lessons.sort(sortByPrefix)
   return lessons
 }
+
+/** Local-folder wrapper: read one directory into entries and group them. */
+function buildLessonsFromDir(dirPath, moduleId, excludeFiles = new Set()) {
+  const entries = []
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const full = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      entries.push({ name: entry.name, isDirectory: true, ref: full, children: null })
+    } else if (entry.isFile()) {
+      entries.push({ name: entry.name, isDirectory: false, size: fs.statSync(full).size, ref: full })
+    }
+  }
+  return buildLessonsFromEntries(entries, moduleId, excludeFiles)
+}
+
+/** Mega wrapper: map Mega nodes to entries and group them. */
+function buildLessonsFromMegaEntries(nodes, moduleId, excludeFiles = new Set()) {
+  return buildLessonsFromEntries(nodes.map((n) => megaEntry(n)), moduleId, excludeFiles)
+}
+
+function megaEntry(node) {
+  return {
+    name: node.name,
+    isDirectory: !!node.directory,
+    size: node.size || 0,
+    ref: mega.locator(currentMegaLinkIndex, mega.nodeHandle(node)),
+    children: node.directory ? (node.children || []).map((c) => megaEntry(c)) : null
+  }
+}
+
+// Set while scanning one Mega link so its entries get the right locators.
+let currentMegaLinkIndex = 0
 
 /** Read a course.md file: first "# Heading" is the display title. */
 function readCourseMd(courseMdPath, course) {
@@ -174,6 +259,7 @@ function scanLibrary(root) {
       order,
       path: coursePath,
       description: '',
+      source: 'local',
       modules: []
     }
 
@@ -226,6 +312,7 @@ function scanLibrary(root) {
       order: 9999,
       path: root,
       description: '',
+      source: 'local',
       modules: [{
         id: `${path.basename(root)}/Lessons`,
         name: 'Lessons',
@@ -243,6 +330,181 @@ function scanLibrary(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Mega library scan — same rules as scanLibrary, over Mega nodes instead
+// of local directories. `rootNode` is the link's target folder (the
+// /folder/<handle> subfolder when the link has one, else the shared folder).
+// ---------------------------------------------------------------------------
+
+function megaCourseMdText(courseNode, linkIndex) {
+  const md = (courseNode.children || []).find(
+    (c) => !c.directory && c.name.toLowerCase() === 'course.md'
+  )
+  if (!md) return ''
+  return mega.readMegaText(md, linkIndex).catch(() => '')
+}
+
+function isLessonFileName(name) {
+  const ext = path.extname(name).toLowerCase()
+  return VIDEO_EXTS.has(ext) || ext === '.md' || SUB_EXTS.has(ext)
+}
+
+async function scanMegaTree(rootNode, linkIndex, linkUrl) {
+  const prefix = `mega/${linkIndex}`
+  const children = rootNode.children || []
+
+  // Single-course shape: the linked folder IS a course — its subfolders
+  // hold lesson files directly (they are modules), or it holds lesson
+  // files directly. This is the common case: a link to one course.
+  // Otherwise the folder is a library root whose subfolders are courses.
+  const childDirHasLessons = (dir) =>
+    (dir.children || []).some((n) => !n.directory && isLessonFileName(n.name))
+  const rootHasDirectLessons = children.some((n) => !n.directory && isLessonFileName(n.name))
+  if (rootHasDirectLessons || children.some((c) => c.directory && childDirHasLessons(c))) {
+    const { order, title } = splitPrefix(rootNode.name || 'Mega')
+    const course = {
+      id: `${prefix}/${rootNode.name || 'Mega'}`,
+      name: title,
+      order,
+      path: linkUrl,
+      description: '',
+      source: 'mega',
+      megaLink: linkIndex,
+      modules: []
+    }
+    const mdText = await megaCourseMdText(rootNode, linkIndex)
+    if (mdText) {
+      const lines = mdText.split('\n')
+      if (lines[0].startsWith('# ')) {
+        course.name = lines[0].replace(/^#\s+/, '').trim()
+        course.description = lines.slice(1).join('\n').trim()
+      } else {
+        course.description = mdText.trim()
+      }
+    }
+    for (const modNode of children) {
+      if (!modNode.directory || modNode.name.startsWith('.')) continue
+      const mod = splitPrefix(modNode.name)
+      const module = {
+        id: `${prefix}/${rootNode.name || 'Mega'}/${modNode.name}`,
+        name: mod.title,
+        order: mod.order,
+        path: linkUrl,
+        lessons: buildLessonsFromMegaEntries(modNode.children || [], `${prefix}/${rootNode.name || 'Mega'}/${modNode.name}`)
+      }
+      if (module.lessons.length > 0) course.modules.push(module)
+    }
+    const flatLessons = buildLessonsFromMegaEntries(
+      children,
+      `${prefix}/${rootNode.name || 'Mega'}/Lessons`,
+      new Set(['course.md'])
+    )
+    if (flatLessons.length > 0) {
+      course.modules.push({
+        id: `${prefix}/${rootNode.name || 'Mega'}/Lessons`,
+        name: 'Lessons',
+        order: 9999,
+        path: linkUrl,
+        lessons: flatLessons
+      })
+    }
+    course.modules.sort(sortByPrefix)
+    return course.modules.length > 0 ? [course] : []
+  }
+
+  const courses = []
+
+  for (const courseNode of children) {
+    if (!courseNode.directory || courseNode.name.startsWith('.')) continue
+    const { order, title } = splitPrefix(courseNode.name)
+    const course = {
+      id: `${prefix}/${courseNode.name}`,
+      name: title,
+      order,
+      path: linkUrl,
+      description: '',
+      source: 'mega',
+      megaLink: linkIndex,
+      modules: []
+    }
+    const mdText = await megaCourseMdText(courseNode, linkIndex)
+    if (mdText) {
+      const lines = mdText.split('\n')
+      if (lines[0].startsWith('# ')) {
+        course.name = lines[0].replace(/^#\s+/, '').trim()
+        course.description = lines.slice(1).join('\n').trim()
+      } else {
+        course.description = mdText.trim()
+      }
+    }
+
+    for (const modNode of courseNode.children || []) {
+      if (!modNode.directory || modNode.name.startsWith('.')) continue
+      const mod = splitPrefix(modNode.name)
+      const module = {
+        id: `${prefix}/${courseNode.name}/${modNode.name}`,
+        name: mod.title,
+        order: mod.order,
+        path: linkUrl,
+        lessons: buildLessonsFromMegaEntries(modNode.children || [], `${prefix}/${courseNode.name}/${modNode.name}`)
+      }
+      if (module.lessons.length > 0) course.modules.push(module)
+    }
+
+    // Flatter layout: lesson files directly inside the course folder.
+    const flatLessons = buildLessonsFromMegaEntries(
+      courseNode.children || [],
+      `${prefix}/${courseNode.name}/Lessons`,
+      new Set(['course.md'])
+    )
+    if (flatLessons.length > 0) {
+      course.modules.push({
+        id: `${prefix}/${courseNode.name}/Lessons`,
+        name: 'Lessons',
+        order: 9999,
+        path: linkUrl,
+        lessons: flatLessons
+      })
+    }
+
+    course.modules.sort(sortByPrefix)
+    if (course.modules.length > 0) courses.push(course)
+  }
+
+  courses.sort(sortByPrefix)
+  return courses
+}
+
+/**
+ * Scan every source into one combined library: the local folder first,
+ * then each Mega link. Returns { libraryPath, megaLinks, courses } where
+ * each megaLinks entry is { url, name, error }.
+ */
+async function scanAll() {
+  const courses = scanLibrary(libraryRoot)
+  const megaLinks = []
+  for (let i = 0; i < state.megaLinks.length; i++) {
+    const link = state.megaLinks[i]
+    currentMegaLinkIndex = i
+    try {
+      const tree = await mega.loadMegaTree(link.url)
+      const name = tree.name
+      if (link.name !== name) {
+        link.name = name
+        saveState(state)
+      }
+      megaLinks.push({ url: link.url, name, error: null })
+      courses.push(...await scanMegaTree(tree.root, i, link.url))
+    } catch (e) {
+      megaLinks.push({ url: link.url, name: link.name || 'Mega folder', error: e.message })
+    }
+  }
+  currentMegaLinkIndex = 0
+  courses.sort(sortByPrefix)
+  await buildSearchIndex(courses)
+  return { libraryPath: libraryRoot, megaLinks, courses }
+}
+
+// ---------------------------------------------------------------------------
 // Search index — titles, notes and subtitle text, built at scan time.
 // ---------------------------------------------------------------------------
 
@@ -255,25 +517,37 @@ function stripSrtTimestamps(text) {
     .join(' ')
 }
 
-function buildSearchIndex(courses) {
+async function buildSearchIndex(courses) {
   searchIndex = []
   for (const course of courses) {
     for (const mod of course.modules) {
       for (const lesson of mod.lessons) {
         let haystack = `${course.name} ${mod.name} ${lesson.name}`
         if (lesson.note) {
-          try { haystack += ' ' + fs.readFileSync(lesson.note, 'utf8') } catch { /* ignore */ }
+          try {
+            haystack += ' ' + await readLessonText(lesson.note)
+          } catch { /* ignore */ }
         }
         for (const sub of lesson.subtitles) {
           try {
-            const raw = fs.readFileSync(sub.path, 'utf8')
-            haystack += ' ' + (sub.lang === 'srt' ? stripSrtTimestamps(raw) : raw)
+            const raw = await readLessonText(sub.path)
+            if (raw) haystack += ' ' + (sub.lang === 'srt' ? stripSrtTimestamps(raw) : raw)
           } catch { /* ignore */ }
         }
         searchIndex.push({ lessonId: lesson.id, course: course.name, module: mod.name, lesson: lesson.name, text: haystack })
       }
     }
   }
+}
+
+/** Read a note/subtitle file by locator: local path or mega:// locator. */
+async function readLessonText(ref) {
+  if (mega.isMegaLocator(ref)) {
+    const resolved = await mega.resolveLocator(ref, state.megaLinks)
+    if (!resolved) return ''
+    return (await mega.readMegaText(resolved.file, resolved.linkIndex)) || ''
+  }
+  return fs.readFileSync(ref, 'utf8')
 }
 
 function searchLibrary(query) {
@@ -322,9 +596,37 @@ function isInsideLibrary(filePath) {
 }
 
 function registerProtocol() {
-  protocol.handle('coursevault', (request) => {
+  protocol.handle('coursevault', async (request) => {
     try {
       const url = new URL(request.url)
+      if (url.hostname === 'mega') {
+        // coursevault://mega/<linkIndex>/<handle> — a Mega video, streamed
+        // in bounded chunks from Mega with a sparse disk cache (see mega.js).
+        const [, linkIdx, handle] = url.pathname.split('/')
+        const resolved = await mega.resolveLocator(`mega://${linkIdx}/${handle}`, state.megaLinks)
+        if (!resolved) return new Response('Not found', { status: 404 })
+        const ext = path.extname(resolved.file.name || '').toLowerCase()
+        const mime = MIME[ext] || 'application/octet-stream'
+        const range = request.headers.get('range')
+        let served
+        try {
+          served = await mega.serveMegaRange(resolved.file, resolved.linkIndex, range, null)
+        } catch (e) {
+          return new Response('Mega download failed: ' + (e.message || e), { status: 502 })
+        }
+        if (served.status === 416) {
+          return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${served.size}` } })
+        }
+        return new Response(served.data, {
+          status: served.status,
+          headers: {
+            'Content-Type': mime,
+            'Content-Length': String(served.data.length),
+            'Content-Range': `bytes ${served.start}-${served.end}/${served.size}`,
+            'Accept-Ranges': 'bytes'
+          }
+        })
+      }
       if (url.hostname !== 'media') return new Response('Not found', { status: 404 })
       const filePath = decodeURIComponent(url.pathname.slice(1))
       if (!isInsideLibrary(filePath) || !fs.existsSync(filePath)) {
@@ -462,11 +764,7 @@ ipcMain.handle('library:pick', async () => {
   return libraryRoot
 })
 
-ipcMain.handle('library:scan', async () => {
-  const courses = scanLibrary(libraryRoot)
-  buildSearchIndex(courses)
-  return { libraryPath: libraryRoot, courses }
-})
+ipcMain.handle('library:scan', async () => scanAll())
 
 ipcMain.handle('library:getState', async () => state)
 
@@ -476,6 +774,36 @@ ipcMain.handle('library:clear', async () => {
   saveState(state)
   if (watcher) { watcher.close(); watcher = null }
   return true
+})
+
+// --- Mega links ------------------------------------------------------------
+
+ipcMain.handle('mega:addLink', async (_event, url) => {
+  try {
+    const tree = await mega.loadMegaTree(url)
+    const clean = url.trim()
+    if (state.megaLinks.some((l) => l.url === clean)) {
+      return { ok: true, name: tree.name, duplicate: true }
+    }
+    state.megaLinks.push({ url: clean, name: tree.name })
+    saveState(state)
+    return { ok: true, name: tree.name }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('mega:removeLink', async (_event, index) => {
+  const removed = state.megaLinks.splice(index, 1)[0]
+  if (removed) mega.dropMegaTree(removed.url)
+  saveState(state)
+  return true
+})
+
+ipcMain.handle('mega:cacheStatus', async (_event, locatorValue) => {
+  const resolved = await mega.resolveLocator(locatorValue, state.megaLinks)
+  if (!resolved) return null
+  return mega.getCacheStatus(resolved.file, resolved.linkIndex)
 })
 
 // --- Progress --------------------------------------------------------------
@@ -491,11 +819,24 @@ ipcMain.handle('progress:getAll', async () => state.progress)
 // --- Lesson files ----------------------------------------------------------
 
 ipcMain.handle('lesson:getNote', async (_event, filePath) => {
+  if (mega.isMegaLocator(filePath)) {
+    const resolved = await mega.resolveLocator(filePath, state.megaLinks)
+    if (!resolved) return null
+    return mega.readMegaText(resolved.file, resolved.linkIndex)
+  }
   if (!isInsideLibrary(filePath) || !fs.existsSync(filePath)) return null
   return fs.readFileSync(filePath, 'utf8')
 })
 
 ipcMain.handle('lesson:getSubtitles', async (_event, filePath) => {
+  if (mega.isMegaLocator(filePath)) {
+    const resolved = await mega.resolveLocator(filePath, state.megaLinks)
+    if (!resolved) return null
+    const raw = await mega.readMegaText(resolved.file, resolved.linkIndex)
+    if (!raw) return null
+    const ext = path.extname(resolved.file.name || '').toLowerCase()
+    return ext === '.srt' ? srtToVtt(raw) : raw
+  }
   if (!isInsideLibrary(filePath) || !fs.existsSync(filePath)) return null
   const raw = fs.readFileSync(filePath, 'utf8')
   const ext = path.extname(filePath).toLowerCase()
@@ -503,6 +844,17 @@ ipcMain.handle('lesson:getSubtitles', async (_event, filePath) => {
 })
 
 ipcMain.handle('file:open', async (_event, filePath) => {
+  if (mega.isMegaLocator(filePath)) {
+    const resolved = await mega.resolveLocator(filePath, state.megaLinks)
+    if (!resolved) return false
+    try {
+      const cached = await mega.ensureMegaFile(resolved.file, resolved.linkIndex, null)
+      await shell.openPath(cached)
+      return true
+    } catch {
+      return false
+    }
+  }
   if (!isInsideLibrary(filePath) || !fs.existsSync(filePath)) return false
   await shell.openPath(filePath)
   return true

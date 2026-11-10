@@ -2,25 +2,31 @@
   <div class="library-view">
     <div v-if="store.loading" class="center">Loading your library…</div>
 
-    <div v-else-if="!store.libraryPath" class="empty">
+    <div v-else-if="!store.libraryPath && store.megaLinks.length === 0" class="empty">
       <h1>Welcome to CourseVault</h1>
-      <p>Pick a folder on your computer that holds your courses, and CourseVault
-        will build your library from it. Your progress stays on this PC —
-        nothing is uploaded anywhere.</p>
+      <p>Pick a folder on your computer that holds your courses, or add a
+        Mega folder link — CourseVault will build your library from either.
+        Your progress stays on this PC — nothing is uploaded anywhere.</p>
       <p class="convention">Expected layout:
         <code>Library / &lt;Course&gt; / &lt;Module&gt; / 01 - &lt;Lesson&gt;.mp4</code>
         — with optional <code>.md</code> notes, <code>.srt</code> subtitles and a
         <code>01 - &lt;Lesson&gt;/</code> folder for downloads next to each lesson.
         Videos directly in a course folder, or directly in the folder you pick,
-        work too — they become one course / one module of lessons.</p>
+        work too — they become one course / one module of lessons. The same
+        layouts work for a Mega folder.</p>
       <button class="btn btn-primary" @click="pickLibrary">Choose library folder</button>
       <p class="hint">Tip: the app ships with a <code>demo-library</code> folder you can
-        pick to see the layout in action — one sample course, notes and subtitles, no video files.</p>
+        pick to see the layout in action — one sample course, notes and subtitles, no video files.
+        Or use the <strong>Add Mega link</strong> button above to connect a Mega folder.</p>
     </div>
 
     <div v-else-if="store.courses.length === 0" class="empty">
       <h1>No courses found</h1>
-      <p>Scanned folder: <code>{{ store.libraryPath }}</code></p>
+      <p v-if="store.libraryPath">Scanned folder: <code>{{ store.libraryPath }}</code></p>
+      <p v-for="link in store.megaLinks" :key="link.url">
+        Mega link: <code>{{ link.name || link.url }}</code>
+        <span v-if="link.error" class="mega-error"> — {{ link.error }}</span>
+      </p>
       <p>CourseVault looks for video, notes or subtitle files in one of these layouts:</p>
       <p class="convention">
         <code>Library / &lt;Course&gt; / &lt;Module&gt; / 01 - &lt;Lesson&gt;.mp4</code><br />
@@ -55,6 +61,7 @@
         >
           <h2>{{ course.name }}</h2>
           <p class="course-meta">
+            <span v-if="course.source === 'mega'" class="mega-badge" title="From a Mega folder link">☁️ Mega</span>
             {{ course.modules.length }} module{{ course.modules.length > 1 ? 's' : '' }} ·
             {{ course.modules.reduce((n, m) => n + m.lessons.length, 0) }} lessons
           </p>
@@ -107,4 +114,10 @@ function firstLine(text) {
 .progress-bar div { height: 100%; background: #4ade80; }
 .course-pct { font-size: 13px; color: #94a3b8; }
 .course-desc { color: #cbd5e1; font-size: 14px; line-height: 1.5; margin: 10px 0 0; }
+.mega-badge {
+  display: inline-block; font-size: 11px; font-weight: 600; color: #bae6fd;
+  background: #0c4a6e; border: 1px solid #075985; border-radius: 999px;
+  padding: 2px 8px; margin-right: 6px; vertical-align: 1px;
+}
+.mega-error { color: #fca5a5; }
 </style>

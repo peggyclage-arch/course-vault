@@ -8,6 +8,7 @@ import { reactive, computed } from 'vue'
 
 export const store = reactive({
   libraryPath: null,
+  megaLinks: [], // [{ url, name, error }] — Mega folder links, second source
   courses: [],
   progress: {}, // lessonId -> { position, duration, completed, updatedAt }
   loading: true,
@@ -58,8 +59,9 @@ export async function loadLibrary() {
   try {
     const state = await window.coursevault.getState()
     store.progress = state.progress || {}
-    const { libraryPath, courses } = await window.coursevault.scanLibrary()
+    const { libraryPath, megaLinks, courses } = await window.coursevault.scanLibrary()
     store.libraryPath = libraryPath
+    store.megaLinks = megaLinks || []
     store.courses = courses
   } finally {
     store.loading = false
@@ -69,6 +71,18 @@ export async function loadLibrary() {
 export async function pickLibrary() {
   const picked = await window.coursevault.pickLibrary()
   if (picked) await loadLibrary()
+}
+
+/** Add a Mega folder link. Returns { ok, name?, error? } from the main process. */
+export async function addMegaLink(url) {
+  const result = await window.coursevault.addMegaLink(url)
+  if (result.ok) await loadLibrary()
+  return result
+}
+
+export async function removeMegaLink(index) {
+  await window.coursevault.removeMegaLink(index)
+  await loadLibrary()
 }
 
 export async function clearLibrary() {
