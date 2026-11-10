@@ -1,0 +1,11 @@
+1
+00:00:00,000 --> 00:00:04,000
+CourseVault turns a folder on your computer into a course library.
+
+2
+00:00:04,000 --> 00:00:09,000
+No accounts, no cloud, no uploads. Your files stay on your PC.
+
+3
+00:00:09,000 --> 00:00:14,000
+Add a video file next to these notes and it will play here, with subtitles.

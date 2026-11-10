@@ -1,0 +1,12 @@
+CourseVault starter checklist
+=============================
+
+[ ] Pick a library folder (your courses live there)
+[ ] Add a course folder, e.g. "My First Course"
+[ ] Inside it, add a module folder, e.g. "01 - Getting started"
+[ ] Inside that, add a lesson video: "01 - Welcome.mp4"
+[ ] Optional: add "01 - Welcome.md" notes next to the video
+[ ] Optional: add "01 - Welcome.srt" subtitles next to the video
+[ ] Optional: add an "01 - Welcome" folder with downloads for the lesson
+
+Re-open CourseVault — the course appears automatically.
