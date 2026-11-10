@@ -76,6 +76,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import VideoPlayer from './VideoPlayer.vue'
 import { findLesson, lessonProgress, markComplete, store } from '../store.js'
 import { renderMarkdown } from '../lib/markdown.js'
+import { bridge } from '../lib/bridge.js'
 import { formatBytes } from '../lib/format.js'
 
 const props = defineProps({
@@ -103,7 +104,7 @@ async function loadNote() {
   noteHtml.value = ''
   noteText.value = ''
   if (lesson.value?.note) {
-    noteText.value = await window.coursevault.getNote(lesson.value.note)
+    noteText.value = await bridge.getNote(lesson.value.note)
     noteHtml.value = renderMarkdown(noteText.value || '')
   }
 }
@@ -113,7 +114,7 @@ function toggleComplete() {
 }
 
 function openFile(filePath) {
-  window.coursevault.openFile(filePath)
+  bridge.openFile(filePath)
 }
 
 function goBack() {

@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/desktop-schema.json","description":"Capabilities for the CourseVault desktop app.","identifier":"default","permissions":["core:default","dialog:allow-open","opener:allow-open-path"],"windows":["main"]}

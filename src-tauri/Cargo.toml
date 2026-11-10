@@ -1,0 +1,24 @@
+[package]
+name = "course-vault"
+version = "1.0.1"
+description = "CourseVault — a local-first desktop course library. Point it at a folder of video lessons and it builds your catalogue, tracks progress, and resumes where you left off. No accounts, no cloud, no AI."
+authors = ["CourseVault"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "7"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

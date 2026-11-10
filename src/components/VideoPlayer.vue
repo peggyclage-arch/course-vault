@@ -10,7 +10,6 @@
       @timeupdate="onTimeUpdate"
       @pause="onPause"
       @ended="onEnded"
-      @error="onVideoError"
     >
       <track
         v-if="subtitleUrl"
@@ -20,10 +19,6 @@
         :src="subtitleUrl"
       />
     </video>
-    <div v-if="isMega && megaStatus && !megaStatus.done" class="mega-status">
-      ☁️ Streaming from Mega — {{ formatBytes(megaStatus.cachedBytes) }} of {{ formatBytes(megaStatus.totalBytes) }} cached on this PC
-    </div>
-    <div v-if="megaError" class="mega-status mega-status-error">{{ megaError }}</div>
     <div v-if="resumeAt > 0 && !resumed" class="resume-bar">
       <span>You left off at {{ formatTime(resumeAt) }}.</span>
       <button class="btn btn-small" @click="jumpToResume">Resume from {{ formatTime(resumeAt) }}</button>
@@ -35,7 +30,8 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { lessonProgress, saveProgress, flushProgress } from '../store.js'
-import { formatTime, formatBytes } from '../lib/format.js'
+import { formatTime } from '../lib/format.js'
+import { bridge } from '../lib/bridge.js'
 
 const props = defineProps({
   lesson: { type: Object, required: true }
@@ -47,35 +43,8 @@ let subtitleBlob = null
 const resumed = ref(false)
 const resumeAt = ref(0)
 
-// Mega streaming status: which bytes of this video are cached on disk.
-const isMega = computed(() =>
-  typeof props.lesson.video === 'string' && props.lesson.video.startsWith('mega://')
-)
-const megaStatus = ref(null) // { cachedBytes, totalBytes, done }
-const megaError = ref('')
-let stopMegaProgress = null
-
-function megaHandle() {
-  const m = /^mega:\/\/\d+\/([\w-]+)$/.exec(props.lesson.video || '')
-  return m ? m[1] : null
-}
-
-async function refreshMegaStatus() {
-  megaError.value = ''
-  if (!isMega.value) { megaStatus.value = null; return }
-  try {
-    megaStatus.value = await window.coursevault.getMegaStatus(props.lesson.video)
-  } catch { megaStatus.value = null }
-}
-
-function onVideoError() {
-  if (isMega.value) {
-    megaError.value = 'Could not stream this video from Mega. Check your connection and try again — Mega sometimes rate-limits downloads for a while.'
-  }
-}
-
 const videoSrc = computed(() =>
-  props.lesson.video ? window.coursevault.mediaUrl(props.lesson.video) : ''
+  props.lesson.video ? bridge.mediaUrl(props.lesson.video) : ''
 )
 
 // Load subtitles (if any) as a blob URL so the <track> element can use them.
@@ -87,7 +56,7 @@ async function loadSubtitles() {
   subtitleUrl.value = null
   const sub = props.lesson.subtitles[0]
   if (!sub) return
-  const vtt = await window.coursevault.getSubtitles(sub.path)
+  const vtt = await bridge.getSubtitles(sub.path)
   if (!vtt) return
   subtitleBlob = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }))
   subtitleUrl.value = subtitleBlob
@@ -143,18 +112,8 @@ function onEnded() {
   flushProgress(props.lesson.id)
 }
 
-onMounted(() => {
-  loadSubtitles()
-  refreshMegaStatus()
-  stopMegaProgress = window.coursevault.onMegaProgress((event) => {
-    if (event.handle === megaHandle()) {
-      megaStatus.value = { cachedBytes: event.cachedBytes, totalBytes: event.totalBytes, done: event.done }
-    }
-  })
-})
-
+onMounted(loadSubtitles)
 onBeforeUnmount(() => {
-  if (stopMegaProgress) { stopMegaProgress(); stopMegaProgress = null }
   if (subtitleBlob) URL.revokeObjectURL(subtitleBlob)
   // Save the position when leaving the lesson mid-video.
   if (videoEl.value && !videoEl.value.ended) {
@@ -170,7 +129,6 @@ watch(() => props.lesson.id, () => {
   resumed.value = false
   resumeAt.value = 0
   loadSubtitles()
-  refreshMegaStatus()
 })
 </script>
 
@@ -193,14 +151,4 @@ watch(() => props.lesson.id, () => {
   border-radius: 10px;
   font-size: 14px;
 }
-.mega-status {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: #0c4a6e;
-  color: #bae6fd;
-  border: 1px solid #075985;
-  border-radius: 8px;
-  font-size: 13px;
-}
-.mega-status-error { background: #450a0a; color: #fca5a5; border-color: #7f1d1d; }
 </style>

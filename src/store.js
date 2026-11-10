@@ -1,14 +1,14 @@
 /**
  * CourseVault — renderer store.
  * Plain Vue 3 reactive state + the functions the views call.
- * All persistence goes through window.coursevault (the preload bridge);
+ * All persistence goes through the Tauri bridge (src/lib/bridge.js);
  * nothing here touches the filesystem.
  */
 import { reactive, computed } from 'vue'
+import { bridge } from './lib/bridge.js'
 
 export const store = reactive({
   libraryPath: null,
-  megaLinks: [], // [{ url, name, error }] — Mega folder links, second source
   courses: [],
   progress: {}, // lessonId -> { position, duration, completed, updatedAt }
   loading: true,
@@ -57,11 +57,10 @@ export function courseProgress(course) {
 export async function loadLibrary() {
   store.loading = true
   try {
-    const state = await window.coursevault.getState()
+    const state = await bridge.getState()
     store.progress = state.progress || {}
-    const { libraryPath, megaLinks, courses } = await window.coursevault.scanLibrary()
+    const { libraryPath, courses } = await bridge.scanLibrary()
     store.libraryPath = libraryPath
-    store.megaLinks = megaLinks || []
     store.courses = courses
   } finally {
     store.loading = false
@@ -69,24 +68,12 @@ export async function loadLibrary() {
 }
 
 export async function pickLibrary() {
-  const picked = await window.coursevault.pickLibrary()
+  const picked = await bridge.pickLibrary()
   if (picked) await loadLibrary()
 }
 
-/** Add a Mega folder link. Returns { ok, name?, error? } from the main process. */
-export async function addMegaLink(url) {
-  const result = await window.coursevault.addMegaLink(url)
-  if (result.ok) await loadLibrary()
-  return result
-}
-
-export async function removeMegaLink(index) {
-  await window.coursevault.removeMegaLink(index)
-  await loadLibrary()
-}
-
 export async function clearLibrary() {
-  await window.coursevault.clearLibrary()
+  await bridge.clearLibrary()
   store.libraryPath = null
   store.courses = []
 }
@@ -116,7 +103,7 @@ export function flushProgress(lessonId) {
   // and Electron's IPC uses structured clone, which cannot clone proxies —
   // passing the proxy throws "An object could not be cloned" and the
   // save silently never happens.
-  window.coursevault.saveProgress(lessonId, { ...store.progress[lessonId] })
+  bridge.saveProgress(lessonId, { ...store.progress[lessonId] })
 }
 
 export function markComplete(lessonId, completed = true) {
@@ -133,7 +120,7 @@ export async function runSearch(query) {
   }
   store.searching = true
   try {
-    store.searchResults = await window.coursevault.search(query)
+    store.searchResults = await bridge.search(query)
   } finally {
     store.searching = false
   }
