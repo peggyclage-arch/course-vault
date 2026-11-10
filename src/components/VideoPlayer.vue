@@ -2,7 +2,7 @@
   <div class="player">
     <video
       ref="videoEl"
-      :key="lesson.id"
+      :key="lesson.id + ':' + reloadCount"
       controls
       preload="metadata"
       :src="videoSrc"
@@ -23,7 +23,10 @@
     <div v-if="isMega && megaStatus && !megaStatus.done" class="mega-status">
       ☁️ Streaming from Mega — {{ formatBytes(megaStatus.cachedBytes) }} of {{ formatBytes(megaStatus.totalBytes) }} cached on this PC
     </div>
-    <div v-if="megaError" class="mega-status mega-status-error">{{ megaError }}</div>
+    <div v-if="megaError" class="mega-status mega-status-error">
+      <span>{{ megaError }}</span>
+      <button class="btn btn-small" @click="retryMega">Retry</button>
+    </div>
     <div v-if="resumeAt > 0 && !resumed" class="resume-bar">
       <span>You left off at {{ formatTime(resumeAt) }}.</span>
       <button class="btn btn-small" @click="jumpToResume">Resume from {{ formatTime(resumeAt) }}</button>
@@ -46,6 +49,7 @@ const subtitleUrl = ref(null)
 let subtitleBlob = null
 const resumed = ref(false)
 const resumeAt = ref(0)
+const reloadCount = ref(0) // bumped by Retry to remount the <video> element
 
 // Mega streaming status: which bytes of this video are cached on disk.
 const isMega = computed(() =>
@@ -53,7 +57,60 @@ const isMega = computed(() =>
 )
 const megaStatus = ref(null) // { cachedBytes, totalBytes, done }
 const megaError = ref('')
+const megaErrorCode = ref('') // 'bandwidth' | 'rateLimit' | 'transient' | 'fatal'
+let retryCountdown = null // interval id for the bandwidth wait timer
 let stopMegaProgress = null
+
+function formatWait(seconds) {
+  if (seconds == null) return 'a while'
+  if (seconds < 60) return `${seconds} seconds`
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `about ${minutes} minute${minutes === 1 ? '' : 's'}`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return `about ${hours} hour${hours === 1 ? '' : 's'}${rest ? ` ${rest} min` : ''}`
+}
+
+function stopRetryCountdown() {
+  if (retryCountdown) { clearInterval(retryCountdown); retryCountdown = null }
+}
+
+/** Turn a structured mega:error event from the main process into the message shown. */
+function onMegaStreamError(event) {
+  megaErrorCode.value = event.code || 'fatal'
+  stopRetryCountdown()
+  if (event.code === 'bandwidth') {
+    // Mega's free transfer quota for this link is exhausted. Retrying
+    // before the quota resets cannot help, so say when to come back.
+    megaError.value = `Mega has paused downloads from this link — its free bandwidth limit is reached. Try again in ${formatWait(event.retryAfterSeconds)}. What you already watched stays cached on this PC.`
+    if (event.retryAfterSeconds) {
+      let remaining = event.retryAfterSeconds
+      retryCountdown = setInterval(() => {
+        remaining -= 1
+        if (remaining <= 0) {
+          stopRetryCountdown()
+          megaError.value = 'Mega’s bandwidth limit should have reset by now — press Retry to continue watching.'
+          return
+        }
+        megaError.value = `Mega has paused downloads from this link — its free bandwidth limit is reached. Try again in ${formatWait(remaining)}. What you already watched stays cached on this PC.`
+      }, 1000)
+    }
+  } else if (event.code === 'rateLimit') {
+    megaError.value = 'Mega is rate-limiting downloads from this link right now. Wait a moment, then press Retry — what you already watched stays cached.'
+  } else if (event.code === 'transient') {
+    megaError.value = 'The download from Mega failed (connection problem). Press Retry — what you already watched stays cached.'
+  } else {
+    megaError.value = 'Could not stream this video from Mega. Press Retry, or check your connection and try again.'
+  }
+}
+
+/** Reload the video element (already-cached chunks come from disk, so a retry is cheap). */
+function retryMega() {
+  megaError.value = ''
+  megaErrorCode.value = ''
+  stopRetryCountdown()
+  reloadCount.value += 1
+}
 
 function megaHandle() {
   const m = /^mega:\/\/\d+\/([\w-]+)$/.exec(props.lesson.video || '')
@@ -69,7 +126,10 @@ async function refreshMegaStatus() {
 }
 
 function onVideoError() {
-  if (isMega.value) {
+  // The main process already sent a specific reason (bandwidth, rate
+  // limit, connection) via the mega:error event — don't clobber it with
+  // the generic text. Only fall back to generic when nothing arrived.
+  if (isMega.value && !megaError.value) {
     megaError.value = 'Could not stream this video from Mega. Check your connection and try again — Mega sometimes rate-limits downloads for a while.'
   }
 }
@@ -96,6 +156,11 @@ async function loadSubtitles() {
 function onLoadedMetadata() {
   const video = videoEl.value
   if (!video) return
+  // A successful load means the stream is working again — clear any
+  // earlier Mega error (e.g. after a Retry).
+  megaError.value = ''
+  megaErrorCode.value = ''
+  stopRetryCountdown()
   const p = lessonProgress(props.lesson.id)
   saveProgress(props.lesson.id, { duration: video.duration })
   // Resume where the user left off (unless barely started or nearly done).
@@ -148,12 +213,17 @@ onMounted(() => {
   refreshMegaStatus()
   stopMegaProgress = window.coursevault.onMegaProgress((event) => {
     if (event.handle === megaHandle()) {
-      megaStatus.value = { cachedBytes: event.cachedBytes, totalBytes: event.totalBytes, done: event.done }
+      if (event.type === 'mega:error') {
+        onMegaStreamError(event)
+      } else {
+        megaStatus.value = { cachedBytes: event.cachedBytes, totalBytes: event.totalBytes, done: event.done }
+      }
     }
   })
 })
 
 onBeforeUnmount(() => {
+  stopRetryCountdown()
   if (stopMegaProgress) { stopMegaProgress(); stopMegaProgress = null }
   if (subtitleBlob) URL.revokeObjectURL(subtitleBlob)
   // Save the position when leaving the lesson mid-video.
@@ -169,6 +239,7 @@ onBeforeUnmount(() => {
 watch(() => props.lesson.id, () => {
   resumed.value = false
   resumeAt.value = 0
+  stopRetryCountdown()
   loadSubtitles()
   refreshMegaStatus()
 })
@@ -202,5 +273,13 @@ watch(() => props.lesson.id, () => {
   border-radius: 8px;
   font-size: 13px;
 }
-.mega-status-error { background: #450a0a; color: #fca5a5; border-color: #7f1d1d; }
+.mega-status-error {
+  background: #450a0a;
+  color: #fca5a5;
+  border-color: #7f1d1d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 </style>

@@ -610,18 +610,23 @@ function registerProtocol() {
         const range = request.headers.get('range')
         let served
         try {
-          served = await mega.serveMegaRange(resolved.file, resolved.linkIndex, range, null)
+          // serveMegaRange returns a stream for the FULL requested range
+          // (see mega.js: a short/clamped 206 breaks Chromium's seeking).
+          // It does not throw for a failed chunk — the stream errors
+          // instead, and the video element reports it. Only a bad range
+          // (416) or a synchronous failure reaches this catch.
+          served = mega.serveMegaRange(resolved.file, resolved.linkIndex, range, null)
         } catch (e) {
           return new Response('Mega download failed: ' + (e.message || e), { status: 502 })
         }
         if (served.status === 416) {
           return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${served.size}` } })
         }
-        return new Response(served.data, {
+        return new Response(served.stream, {
           status: served.status,
           headers: {
             'Content-Type': mime,
-            'Content-Length': String(served.data.length),
+            'Content-Length': String(served.total),
             'Content-Range': `bytes ${served.start}-${served.end}/${served.size}`,
             'Accept-Ranges': 'bytes'
           }
